@@ -1,0 +1,439 @@
+# -*- coding: utf-8 -*-
+import os
+import sys
+import getpass
+import time
+import datetime
+# import urlparse
+import urllib.parse
+import logging
+import numpy as np
+import re
+import hashlib
+import yaml
+import json
+
+R = '\x1b[0;91m{}\x1b[0m'  # red
+G = '\x1b[0;92m{}\x1b[0m'  # green
+Y = '\x1b[0;93m{}\x1b[0m'  # yellow
+B = '\x1b[0;94m{}\x1b[0m'  # blue
+F = '\x1b[0;95m{}\x1b[0m'  # fuchsia
+C = '\x1b[0;96m{}\x1b[0m'  # cyan
+W = '\x1b[0;97m{}\x1b[0m'  # white
+
+
+class LogToNull(object):
+    """an replacement of `logzero` on prod env
+    in local env, do colorful log,
+    in prod env, log nothing.
+    """
+
+    def info(self, *args, **kwargs):
+        pass
+
+    def warning(self, *args, **kwargs):
+        pass
+
+    def debug(self, *args, **kwargs):
+        pass
+
+    def error(self, *args, **kwargs):
+        pass
+
+    def exception(self, *args, **kwargs):
+        pass
+
+    def fatal(self, *args, **kwargs):
+        pass
+
+
+class NebuError(Exception):
+    def __init__(self, value):
+        self.value = value
+
+    def __str__(self):
+        return repr(self.value)
+
+
+class NebuIPForbiddenError(NebuError):
+    def __init__(self, value):
+        self.value = value
+
+
+class NebuWorkflow(Exception):
+    """ in some situations, we need to break normal crawl process
+
+    e.g.
+        - site 186: always has next page button, even with empty results
+    """
+
+    def __init__(self, value):
+        self.value = value
+
+    def __str__(self):
+        return repr(self.value)
+
+
+def init_logger(name):
+    log_ = logging.getLogger(name)
+    log_.addHandler(logging.StreamHandler(sys.stdout))
+    return log_
+
+
+def debug_env(prod_env='/root/dev/pipino'):
+    """for now, use PIPINOHOME to decide if debug env
+
+    - in PROD env `PIPINOHOME == '/root/dev/pipino'`
+    """
+    return os.environ.get('PIPINOHOME') != prod_env
+
+
+def debug_mode(users=None):
+    """return if current login user in users
+
+    Keyword Arguments:
+        users {list/str} -- user list (default: {None})
+
+    Returns:
+        bool -- if login user in users.
+    """
+    if not users:
+        return False
+    users = users if isinstance(users, list) else [users]
+    return True if getpass.getuser() in users else False
+
+
+"""
+time functions
+"""
+
+
+def today():
+    return datetime.date.today()
+
+
+def str2date(ts, delimiter='-'):
+    """
+    even convert failed, will guarantee a date(1970,1,1)
+
+    Args:
+        ts (): str
+        delimiter (): str
+
+    Returns:
+        datetime.date
+    """
+    alter_ts = [1970, 1, 1]
+    try:
+        ts_tpl = [int(x) for x in ts.split(delimiter)[:3]]
+        ts_tpl += alter_ts[len(ts_tpl):]
+        return datetime.date(*ts_tpl)
+    except:
+        return datetime.date(*alter_ts)
+
+
+def date2str(dt, fmt='%Y-%m-%d'):
+    try:
+        return dt.strftime(fmt)
+    except:
+        return datetime.date(1970, 1, 1).strftime(fmt)
+
+
+def dtn():
+    return datetime.datetime.now()
+
+
+def now(fmt='%Y-%m-%d %H:%M:%S'):
+    """format current timestamp with `fmt` formatter
+    """
+    return datetime.datetime.now().strftime(fmt)
+
+
+def str2unixtime(ts, fmt='%Y-%m-%d %H:%M:%S'):
+    """ convert time str with `fmt` to unix timestamp
+    """
+    try:
+        t = time.strptime(ts, fmt)
+        return int(time.mktime(t))
+    except Exception as _:
+        print(_)
+
+
+def unixtime2str(timestamp, fmt='%Y-%m-%d %H:%M:%S'):
+    """ convert `timestamp` to str
+
+    `Warning`:
+        timestamp unit is second, not millisecond
+    """
+    try:
+        timestamp = time.localtime(timestamp)
+        dt = time.strftime(fmt, timestamp)
+        return dt
+    except Exception as _:
+        print(_)
+
+
+def unixtime(mm=False):
+    """ get current timestamp, if mm == True, will return milliseconds
+    """
+    multi = 1000 if mm else 1
+    return int(round(time.time() * multi))
+
+
+def rand_float(minimum, scale):
+    return np.random.pareto(1) * scale + minimum
+
+
+def random_sleep(minimum, scale, max_timeout=5):
+    """sleeps for a random amount of time,
+    with a min time of minimum seconds, and a long right tail.
+
+    - Capped at `5 seconds`
+    """
+    if not debug_env():
+        # force set 15 if PROD env
+        max_timeout = 15
+    time.sleep(min(rand_float(minimum, scale), max_timeout))
+
+
+"""
+urllib
+"""
+
+
+def url2dict(url=''):
+    """Parse url to dict
+
+    just want the dict parsed by the url
+
+    so if error happened just return it self as one choice of (None, 0, False, etc.),
+    can use if same value instead of try ... except ... statement for convenient
+
+    Returns:
+        the url dict / just the url(if some error happened)
+    """
+    try:
+        d = urllib.parse.urlparse(url)
+        dat = urllib.parse.parse_qs(d.query)
+        dat['urlparse_ParseResult'] = d
+        return dat
+    except:
+        return url
+
+
+def gen_selenium_find_method(ele_type, multiple=False, extra_maps=None):
+    """
+    change ele_type to appropriate selenium method
+
+    - gen_selenium_find_method(ele_type=name, False) => find_element_by_name
+    - gen_selenium_find_method(ele_type=name, True) => find_elements_by_name
+    """
+    _ = 'elements' if multiple else 'element'
+    d = {
+        'class': 'class_name'
+    }
+    if isinstance(extra_maps, dict):
+        d = dict(d, **extra_maps)
+    return 'find_{}_by_{}'.format(_, d.get(ele_type, ele_type))
+
+
+def encode_html(source, obj):
+    """
+    encode by 3 ways
+
+        I. obj.charset
+        II. if `I` failed, try with ignore
+        III. if both `I && II` failed, use default `utf-8`
+
+    Args:
+        source (str):
+        obj (class):
+
+    Returns:
+        source
+    """
+    try:
+        source = source.encode(obj.charset)
+    except:
+        try:
+            # reference: `https://stackoverflow.com/questions/3224268/python-unicode-encode-error`
+            # this will ignore chars that can not be encoded
+            source = source.encode(obj.charset, 'ignore')
+        except:
+            source = source.encode('utf-8')
+    finally:
+        return source
+
+
+"""
+file
+"""
+
+
+def mkdir_p(dst_dir, is_dir=False):
+    """"""
+    h, _ = os.path.split(dst_dir)
+    if is_dir:
+        h = dst_dir
+    try:
+        if not os.path.exists(h):
+            os.makedirs(h)
+    except FileExistsError as _:
+        pass
+    except Exception as err:
+        raise err
+
+
+def walk_dir_with_filter(pth, prefix=None, suffix=None):
+    """
+        walk all dir, return as list
+
+    - ``prefix`` filter out with prefix
+    - ``suffix`` filter out with suffix
+
+    """
+    if suffix is None or type(suffix) != list:
+        suffix = []
+    if prefix is None or type(prefix) != list:
+        prefix = []
+
+    r = []
+    for root_, dirs, files in os.walk(pth):
+        for file_ in files:
+            full_pth = os.path.join(root_, file_)
+
+            c = False
+            for x in prefix:
+                if file_.startswith(x):
+                    c = True
+                    break
+            if c:
+                continue
+            # if runs here , c is False
+            for x in suffix:
+                if file_.endswith(x):
+                    c = True
+                    break
+            if c:
+                continue
+            r.append(full_pth)
+    return r
+
+
+def read_file(pth):
+    try:
+        with open(pth) as fp:
+            cont = fp.read()
+        return cont
+    except Exception as err:
+        print(err)
+
+
+def write_file(dat, pth, append=False):
+    err = None
+
+    _d, _nm = os.path.split(pth)
+    if _d and not os.path.exists(_d):
+        os.makedirs(_d)
+
+    try:
+        mode = 'ab' if append else 'wb'
+
+        with open(pth, mode) as _fp:
+            _fp.write(to_bytes(dat))
+    except Exception as _err:
+        err = _err
+    return err
+
+
+"""
+others
+"""
+
+
+def md5(dat, salt='nebutec'):
+    try:
+        dat += salt
+        dat = to_bytes(dat)
+        return hashlib.md5(dat).hexdigest()
+    except:
+        return dat
+
+
+def char_to_num(src, chars_allowed='0123456789', dot_as_num=True):
+    """ filter out src with chars_allowed only
+
+    :param src: chars to filter out
+    :type src: str
+    :param chars_allowed: allowed chars
+    :type chars_allowed: str
+    :param dot_as_num: treat dot as numbers
+    :type dot_as_num: bool
+    :return: filter out result
+    :rtype: str
+    """
+    if dot_as_num:
+        chars_allowed += '.'
+    n = ''.join(list([c for c in src if c in chars_allowed]))
+    return n
+
+
+def yaml_loader(file_pth):
+    try:
+        with open(file_pth, 'rb') as f:
+            cfg = yaml.load(f, Loader=yaml.FullLoader)
+
+        return cfg
+    except Exception as e:
+        return
+
+
+"""
+string bytes
+"""
+
+
+def to_str(str_or_bytes, encoding='utf-8'):
+    """ convert str_or_bytes to str
+
+        - if hasattr(str_or_bytes, 'decode')
+    """
+    return str_or_bytes.decode(encoding) if hasattr(str_or_bytes, 'decode') else str_or_bytes
+
+
+def to_bytes(str_or_bytes, encoding='utf-8'):
+    """ convert str_or_bytes to bytes
+
+        - if hasattr(str_or_bytes, 'encode')
+    """
+    return str_or_bytes.encode(encoding) if hasattr(str_or_bytes, 'encode') else str_or_bytes
+
+
+def dict_value_formatter(dat, to_dict=False):
+    """
+    will process all first level values of a dict to json string
+
+    WARN: Added @0705 this only used for dump/load mapper/kwargs to/from redis
+    """
+    mixed = {}
+    for _key, _val in dat.items():
+        if to_dict:
+            mixed[_key] = json.loads(_val)
+        else:
+            mixed[_key] = json.dumps(_val)
+    return mixed
+
+
+def copy_dict_with_updated_key(dat, old_key='', new_key=''):
+    """ only go through dict's first level keys, and replace keys old_key with new_key
+    this returns a new dict, never modify original one.
+    """
+    try:
+        # speed up a bit
+        if not old_key:
+            return dat
+
+        config = {k.replace(old_key, new_key): v for k, v in dat.items()}
+        return config
+    except:
+        return dat
